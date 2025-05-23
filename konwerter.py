@@ -1,29 +1,30 @@
 from nicegui import ui
 from nicegui.events import UploadEventArguments
-import fitz
+import fitz  
 import pdfplumber
 import os
 import re
 from datetime import datetime
 import hashlib
-from nicegui import app
+import json
 
 # --- Folders for storing uploaded and output files ---
 pdf_folder = 'pdfs'
 os.makedirs(pdf_folder, exist_ok=True)
+
+from nicegui import app
 app.add_static_files('/pdfs', pdf_folder)
 
-# --- Globalne zmienne ---
 uploaded_file = None
-uploaded_filename = ''      
+original_filename = None
 markdown_text = "# Upload a PDF file to convert it to Markdown"
+html_text = ""
 display_markdown = True
 pdf_url = ''
 md_url = ''
-original_filename = ''      
+html_url = ''
 
-
-# --- Funkcje konwertujące zawartość PDF na Markdown ---
+# --- Conversion functions ---
 def format_text_block_to_markdown(block):
     markdown = ""
     for line in block["lines"]:
@@ -48,7 +49,6 @@ def format_text_block_to_markdown(block):
         markdown += "\n"
     return markdown
 
-
 def table_to_markdown(table):
     if not table or not table[0]:
         return ""
@@ -60,7 +60,6 @@ def table_to_markdown(table):
         md += "| " + " | ".join(row) + " |\n"
     return md + "\n"
 
-
 def get_tables_with_bbox(plumber_page):
     tables_info = []
     for table_obj in plumber_page.find_tables():
@@ -69,19 +68,19 @@ def get_tables_with_bbox(plumber_page):
         tables_info.append({"bbox": bbox, "data": rows})
     return tables_info
 
-
 def bbox_intersects(b1, b2):
     return not (b1[2] <= b2[0] or b1[0] >= b2[2] or b1[3] <= b2[1] or b1[1] >= b2[3])
 
-
-def pdf_to_markdown(pdf_path):
+def pdf_to_markdown(pdf_path, output_folder):
     doc = fitz.open(pdf_path)
     plumber_pdf = pdfplumber.open(pdf_path)
+
     output = []
     total_pages = len(doc)
 
     for page_num in range(total_pages):
         output.append(f"\n\n---\n\n## Strona {page_num + 1}\n\n")
+
         mu_page = doc[page_num]
         plumber_page = plumber_pdf.pages[page_num]
         blocks = mu_page.get_text("dict")["blocks"]
@@ -112,90 +111,107 @@ def pdf_to_markdown(pdf_path):
     doc.close()
     return ''.join(output)
 
+def pdf_to_html(pdf_path):
+    doc = fitz.open(pdf_path)
+    html_pages = []
+    for page in doc:
+        html_pages.append(page.get_text("html"))
+    doc.close()
+    # Złącz wszystkie strony w jeden plik HTML
+    full_html = "<html><body>\n" + "\n<hr>\n".join(html_pages) + "\n</body></html>"
+    return full_html
 
-# --- Logika uploadu i konwersji ---
+# --- Utility: hash content of file bytes ---
+def hash_bytes(content_bytes):
+    return hashlib.sha256(content_bytes).hexdigest()
+
+# --- Handling of upload and conversion ---
 def convert_and_display_pdf(file_bytes: bytes, original_name: str):
-    global markdown_text, pdf_url, md_url, original_filename
+    global markdown_text, pdf_url, md_url, html_text, html_url
 
-    # Oblicz hash zawartości, aby znaleźć (lub utworzyć) unikalny folder
-    sha256 = hashlib.sha256(file_bytes).hexdigest()
-    pdf_subfolder = os.path.join(pdf_folder, sha256)
-    info_path = os.path.join(pdf_subfolder, 'info.txt')
-
-    # Jeśli folder już istnieje, spróbuj odczytać nazwę z info.txt
-    if os.path.exists(pdf_subfolder):
-        if os.path.exists(info_path):
-            with open(info_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.startswith('name:'):
-                        original_name = line.split(':', 1)[1].strip()
-                        break
-            original_filename = original_name
-            existing_pdf_path = os.path.join(pdf_subfolder, original_name)
-            existing_md_path = os.path.join(pdf_subfolder, os.path.splitext(original_name)[0] + '.md')
-
-            # Jeśli zarówno PDF, jak i MD istnieją, wczytaj MD i ustaw URL-e
-            if os.path.exists(existing_pdf_path) and os.path.exists(existing_md_path):
-                with open(existing_md_path, 'r', encoding='utf-8') as md_file:
-                    markdown_text = md_file.read()
-                pdf_url = f'/pdfs/{sha256}/{original_name}'
-                md_url = f'/pdfs/{sha256}/{os.path.basename(existing_md_path)}'
-                return
-
-    # Jeżeli tu dochodzimy – folder nie istniał lub brakowało pliku, więc tworzymy nowy
+    file_hash = hash_bytes(file_bytes)
+    pdf_subfolder = os.path.join(pdf_folder, file_hash)
     os.makedirs(pdf_subfolder, exist_ok=True)
+
     pdf_path = os.path.join(pdf_subfolder, original_name)
+    info_json_path = os.path.join(pdf_subfolder, 'info.json')
+
+    if os.path.exists(pdf_path) and os.path.exists(info_json_path):
+        with open(info_json_path, 'r', encoding='utf-8') as f:
+            info_data = json.load(f)
+        md_filename = os.path.splitext(info_data.get("name", original_name))[0] + '.md'
+        md_path = os.path.join(pdf_subfolder, md_filename)
+        with open(md_path, 'r', encoding='utf-8') as md_file:
+            markdown_text = md_file.read()
+        pdf_url = f'/pdfs/{file_hash}/{info_data.get("name", original_name)}'
+        md_url = f'/pdfs/{file_hash}/{md_filename}'
+
+        # Wczytaj plik html jeśli istnieje
+        html_filename = os.path.splitext(info_data.get("name", original_name))[0] + '.html'
+        html_path = os.path.join(pdf_subfolder, html_filename)
+        if os.path.exists(html_path):
+            with open(html_path, 'r', encoding='utf-8') as html_file:
+                html_text = html_file.read()
+            html_url = f'/pdfs/{file_hash}/{html_filename}'
+        else:
+            html_text = ""
+            html_url = ''
+        return
+
     with open(pdf_path, 'wb') as f:
         f.write(file_bytes)
 
-    # Zapisujemy oryginalną nazwę w info.txt w formacie "name: <nazwa>"
-    with open(info_path, 'w', encoding='utf-8') as f:
-        f.write(f'name: {original_name}')
+    info_data = {
+        "name": original_name,
+        "uploaded_at": datetime.now().isoformat(timespec='seconds'),
+        "size_bytes": len(file_bytes)
+    }
+    with open(info_json_path, 'w', encoding='utf-8') as f:
+        json.dump(info_data, f, indent=2, ensure_ascii=False)
 
-    original_filename = original_name
-    markdown_text = pdf_to_markdown(pdf_path)
+    markdown_text = pdf_to_markdown(pdf_path, pdf_subfolder)
+    html_text = pdf_to_html(pdf_path)
 
-    # Zapis Markdown’a
+    pdf_url = f'/pdfs/{file_hash}/{original_name}'
+
     md_filename = os.path.splitext(original_name)[0] + '.md'
     md_path = os.path.join(pdf_subfolder, md_filename)
     with open(md_path, 'w', encoding='utf-8') as md_file:
         md_file.write(markdown_text)
+    md_url = f'/pdfs/{file_hash}/{md_filename}'
 
-    pdf_url = f'/pdfs/{sha256}/{original_name}'
-    md_url = f'/pdfs/{sha256}/{md_filename}'
-
+    html_filename = os.path.splitext(original_name)[0] + '.html'
+    html_path = os.path.join(pdf_subfolder, html_filename)
+    with open(html_path, 'w', encoding='utf-8') as html_file:
+        html_file.write(html_text)
+    html_url = f'/pdfs/{file_hash}/{html_filename}'
 
 def on_upload(e: UploadEventArguments):
-    global uploaded_file, uploaded_filename
-    if e.name.lower().endswith('.pdf'):
+    global uploaded_file, original_filename
+    if e.name.endswith('.pdf'):
         uploaded_file = e.content.read()
-        uploaded_filename = e.name  # Rzeczywista nazwa z klienta
+        original_filename = e.name
         upload_button.enable()
         ui.notify(f'File "{e.name}" uploaded successfully.', type='success')
+        print(f"Uploaded file size: {len(uploaded_file)} bytes")
     else:
         ui.notify('Only .pdf files are allowed', type='warning')
         upload_button.disable()
-
+        print(f"Rejected file upload: {e.name}")
 
 def on_click_upload():
-    global uploaded_file, uploaded_filename
-    if not uploaded_file:
+    global uploaded_file, original_filename
+    if not uploaded_file or not original_filename:
         ui.notify('Please upload a PDF file first.', type='warning')
         return
 
     try:
-        # Przekazujemy tutaj prawdziwą nazwę (nie "uploaded.pdf")
-        convert_and_display_pdf(uploaded_file, uploaded_filename)
+        convert_and_display_pdf(uploaded_file, original_filename)
         update_display()
     except Exception as e:
         ui.notify(f"Conversion error: {e}", type='error')
 
-
 def update_display():
-    # Wyświetlamy oryginalną nazwę pliku nad PDF-em
-    filename_label.text = f"Oryginalny plik: {original_filename}"
-    filename_label.update()
-
     markdown_output.set_content(markdown_text if display_markdown else f"```\n{markdown_text}\n```")
     markdown_output.update()
     if pdf_url:
@@ -203,12 +219,12 @@ def update_display():
         pdf_iframe.update()
     if md_url:
         download_button.enable()
-
+    if html_url:
+        download_html_button.enable()
 
 # --- UI ---
 with ui.card().classes('w-full max-w-3xl'):
     ui.label('Upload a PDF file')
-    filename_label = ui.label('')  # Tu pokażemy oryginalną nazwę po konwersji
 
     ui.upload(
         label='Choose PDF',
@@ -217,7 +233,7 @@ with ui.card().classes('w-full max-w-3xl'):
         max_files=1,
     ).props('accept=.pdf')
 
-    upload_button = ui.button('Convert to Markdown', on_click=on_click_upload)
+    upload_button = ui.button('Convert to Markdown & HTML', on_click=on_click_upload)
     upload_button.disable()
 
     ui.separator()
@@ -235,6 +251,8 @@ with ui.card().classes('w-full max-w-3xl'):
     toggle_button = ui.button('Switch to markdown', on_click=toggle_view)
     download_button = ui.button('Download Markdown', on_click=lambda: ui.download(md_url, 'converted.md'))
     download_button.disable()
+    download_html_button = ui.button('Download HTML', on_click=lambda: ui.download(html_url, 'converted.html'))
+    download_html_button.disable()
 
     markdown_output = ui.markdown(markdown_text if display_markdown else f"```\n{markdown_text}\n```")
 
