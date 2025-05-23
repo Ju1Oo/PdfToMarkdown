@@ -15,12 +15,12 @@ app.add_static_files('/pdfs', pdf_folder)
 
 # --- Globalne zmienne ---
 uploaded_file = None
-uploaded_filename = ''      # Tu przechowamy oryginalną nazwę z UploadEventArguments.name
+uploaded_filename = ''      
 markdown_text = "# Upload a PDF file to convert it to Markdown"
 display_markdown = True
 pdf_url = ''
 md_url = ''
-original_filename = ''      # Tu przechowamy nazwę pliku używaną w konwersji
+original_filename = ''      
 
 
 # --- Funkcje konwertujące zawartość PDF na Markdown ---
